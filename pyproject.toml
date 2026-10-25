@@ -1,0 +1,49 @@
+[project]
+name = "audio-mastering-sidecar"
+version = "0.1.0"
+description = "Stateless HTTP sidecar: reference-matched mastering (Matchering) and independent BS.1770 loudness measurement. Raw measurements and audio only, no policy."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.13"
+authors = [{ name = "wavbee" }]
+keywords = ["audio", "mastering", "matchering", "loudness", "ebu-r128", "fastapi"]
+
+dependencies = [
+  "matchering>=2.0.6",
+  "pyloudnorm>=0.2.0",
+  "pyebur128>=0.1.1",
+  "soundfile>=0.14.0",
+  "numpy>=2.5.4",
+  "fastapi>=0.162.0",
+  "uvicorn[standard]>=0.54.0",
+  "python-multipart>=0.0.32",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.1.1",
+  "httpx>=0.28.1",
+  "ruff>=0.17.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/wavbee/audio-mastering-sidecar"
+Source = "https://github.com/wavbee/audio-mastering-sidecar"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
