@@ -10,8 +10,9 @@ A small, stateless HTTP service that does four things with audio files:
    [libebur128](https://github.com/jiixyj/libebur128) (via
    [pyebur128](https://github.com/jodhus/pyebur128)) and
    [pyloudnorm](https://github.com/csteinmetz1/pyloudnorm).
-3. **Analysis** — a waveform overview, a long-term 1/6-octave spectrum, a
-   coarse spectrogram and the stereo image, as numbers ready to draw or compare.
+3. **Analysis** — a waveform overview with true peak, a long-term 1/6-octave
+   spectrum, a spectrogram, the stereo image and where the audio sits at full
+   scale, as numbers ready to draw or compare.
 4. **EQ matching** — a linear-phase EQ that moves a track toward a tonal-balance
    curve the caller supplies (for example one taken from a reference's analysis).
 
@@ -49,7 +50,7 @@ across a process boundary. (Engineering rationale, not legal advice.)
 ```json
 { "status": "ok", "service_version": "0.1.0", "matchering_version": "2.0.6",
   "pyloudnorm_version": "0.2.0", "libebur128_version": "1.2.6",
-  "scipy_version": "1.18.1", "analysis_version": 1 }
+  "scipy_version": "1.18.1", "analysis_version": 2 }
 ```
 
 `analysis_version` changes whenever `/analyze` or `/eq_match` would compute a
@@ -98,36 +99,66 @@ Matchering's own explanation.
 ### `POST /analyze`
 
 Multipart upload with a `file` field. Real output for five seconds of
-synthesised stereo noise (each channel low-passed, so it is darker than white),
-with every array cut to its first three entries:
+synthesised stereo noise (each channel low-passed, so it is darker than white)
+whose 2.0–2.2 s stretch was driven eight times over full scale and saturated
+by the 24-bit format, with every array cut to its first three entries:
 
 ```json
 {
-  "analysis_version": 1,
+  "analysis_version": 2,
   "format": { "sample_rate": 48000, "channels": 2, "duration_s": 5.0 },
-  "integrated_lufs": -14.732,
-  "waveform": { "points": 1000, "seconds_per_point": 0.005,
-                "peak": [0.2504, 0.3725, 0.3713], "rms": [0.0866, 0.1073, 0.1084] },
+  "integrated_lufs": -9.646,
+  "waveform": { "points": 4000, "seconds_per_point": 0.00125,
+                "peak": [0.1996, 0.2861, 0.2555], "rms": [0.0778, 0.0953, 0.0948],
+                "true_peak": [0.2063, 0.2864, 0.2617] },
   "spectrum": { "bands_hz": [22.1, 24.8, 27.84],
-                "mid_db": [-59.44, -59.44, -58.53], "side_db": [-58.24, -58.24, -59.03],
-                "relative_mid_db": [-44.7, -44.7, -43.8],
-                "relative_side_db": [-43.51, -43.51, -44.3] },
+                "mid_db": [-57.01, -57.01, -55.8], "side_db": [-57.66, -57.66, -56.92],
+                "relative_mid_db": [-47.36, -47.36, -46.15],
+                "relative_side_db": [-48.01, -48.01, -47.27] },
   "spectrogram": { "frames": 57, "seconds_per_frame": 0.087719,
-                   "bands_hz": [24.8, 31.25, 39.37],
-                   "db": [[-74, -46, -46], [-50, -51, -49], [-61, -60, -50]] },
-  "stereo": { "correlation": 0.0, "side_to_mid_db": 0.0 }
+                   "bands_hz": [22.1, 24.8, 27.84],
+                   "db": [[-80, -80, -52], [-56, -55, -57], [-67, -66, -66]] },
+  "stereo": { "correlation": 0.0067, "side_to_mid_db": -0.06 },
+  "clipping": { "full_scale": 0.9999, "min_run": 3,
+                "events": [ { "start_s": 2.0, "end_s": 2.1996, "channels": [0, 1],
+                              "samples": 1419, "peak_dbfs": 0.0 } ],
+                "events_total": 1, "clipped_samples": 1419 }
 }
 ```
+
+Inside the saturated stretch (waveform points 1600–1602, from 2.0 s) the
+sample peak is pinned at `[1.0, 1.0, 1.0]` while `true_peak` reads
+`[1.4365, 1.4048, 1.2972]`: the reconstructed waveform overshoots full scale
+by up to 3.15 dB between the samples.
 
 | Field | What it is |
 |---|---|
 | `integrated_lufs` | libebur128 integrated loudness; `null` for silence or under 400 ms |
-| `waveform` | `min(1000, samples)` points; per point the largest \|sample\| and the RMS over all channels |
+| `waveform` | `min(4000, samples)` points; per point the largest \|sample\| (`peak`), the RMS over all channels (`rms`) and the true peak (`true_peak`): the largest \|value\| over all channels after ×4 polyphase oversampling (`scipy.signal.resample_poly`), as ITU-R BS.1770 defines true peak. `true_peak` is never below `peak` and is **not** clipped at 1.0 |
 | `spectrum.bands_hz` | 1/6-octave centres `1000·2^(k/6)` within 20 Hz–20 kHz (22.1 Hz … 17.96 kHz, 59 bands), the same list for every file |
 | `spectrum.mid_db` / `side_db` | `10·log10` of the mean power spectral density in each band, of mid `(L+R)/2` and side `(L−R)/2`; `side_db` is `null` for mono |
 | `spectrum.relative_*_db` | the band levels minus `integrated_lufs` — tonal balance independent of level; `null` when the loudness is |
-| `spectrogram` | `min(300, frames)` time slices × 1/3-octave bands (ISO 25 Hz … 20 kHz, 30 bands) of mid band power in dB, integers floored at −120 (a full-scale sine reads −3) |
+| `spectrogram` | `min(1200, frames)` time slices × the same 59 bands as `spectrum.bands_hz`, of mid band power in dB, integers floored at −120 (a full-scale sine reads −3); each slice averages the 8192-sample frames that fall in it |
 | `stereo` | L/R correlation and side-to-mid energy ratio in dB, both `null` for mono; `correlation` is also `null` if a channel is silent, `side_to_mid_db` if there is no side at all (dual mono) |
+| `clipping` | where the file sits at full scale — see below |
+
+`clipping` follows one physical definition and no judgement:
+
+* A sample is at full scale when `|sample| >= full_scale` (0.9999). Integer PCM
+  is read as float, so a saturated 16-bit sample (32767 → 0.99997) and a 24-bit
+  one count, as does anything over 1.0 in a float file.
+* A clip is a run of at least `min_run` (3) consecutive full-scale samples on
+  one channel. One or two are an ordinary peak.
+* Runs on any channels less than 50 ms apart form one event: `start_s` is the
+  first full-scale sample, `end_s` the moment after the last (both 4 dp),
+  `channels` the channels involved (0 = left), `samples` the full-scale samples
+  in its runs summed over channels, `peak_dbfs` the largest \|sample\| in them.
+* `events` lists at most 500 events — the 500 with the most samples, in time
+  order. `events_total` is the uncapped count and `clipped_samples` the samples
+  in every counted run, all channels.
+
+The file is streamed in blocks: a 10-minute 96 kHz stereo file takes about
+16 s on a laptop (most of it the ×4 oversampling) and peaks near 250 MB.
 
 How the spectrum is measured, because two files are only comparable if they
 were measured the same way:
