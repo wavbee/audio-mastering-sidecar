@@ -1,7 +1,7 @@
 [project]
 name = "audio-mastering-sidecar"
 version = "0.1.0"
-description = "Stateless HTTP sidecar: reference-matched mastering (Matchering) and independent BS.1770 loudness measurement. Raw measurements and audio only, no policy."
+description = "Stateless HTTP sidecar: reference-matched mastering (Matchering), independent BS.1770 loudness measurement, spectral analysis and EQ matching. Raw measurements and audio only, no policy."
 readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.13"
