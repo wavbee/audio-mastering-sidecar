@@ -19,6 +19,8 @@ Choices that matter to a caller comparing two files:
   * Bands narrower than one FFT bin (low bands at high sample rates) are
     filled by interpolating their neighbours in log-frequency. JSON has no
     NaN, and a hole in the curve is not a measurement either.
+  * Runs of full-scale samples are located in time; ``app.clipping`` says
+    exactly what counts.
   * The waveform carries a true peak per point beside the sample peak: the
     largest value of the x4-oversampled signal, as BS.1770 defines true peak.
     It is not clipped at 1.0; an inter-sample peak over full scale is exactly
@@ -36,6 +38,8 @@ import numpy as np
 import pyebur128 as ebur
 import soundfile as sf
 from scipy.signal import get_window, resample_poly
+
+from app.clipping import ClipScan
 
 ANALYSIS_VERSION = 2
 
@@ -135,6 +139,7 @@ class _Scan:
 
         # sum L*L, R*R, L*R, M*M, S*S
         self.stereo_sums = np.zeros(5)
+        self.clips: ClipScan | None = None  # set by scan() when it maps the timeline
 
     def add_samples(self, block: np.ndarray, offset: int) -> None:
         """Waveform and stereo statistics, which see each sample once."""
@@ -254,11 +259,13 @@ def _mid_side(data: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
 def scan(path: str, timeline: bool = True) -> tuple[_Scan, float | None]:
     """One streaming pass: every accumulator, plus integrated loudness.
     ``timeline=False`` skips the true-peak oversampling, the costliest
-    accumulator, for callers that only want the spectrum."""
+    accumulator, and the clipping scan, for callers that only want the
+    spectrum."""
     info = sf.info(path)
     if info.frames <= 0:
         raise ValueError("the file holds no audio frames")
     acc = _Scan(info.samplerate, info.channels, info.frames)
+    acc.clips = ClipScan(info.samplerate, info.channels) if timeline else None
     meter = ebur.R128State(info.channels, info.samplerate, ebur.MeasurementMode.MODE_I)
 
     pending = np.zeros((0, info.channels))
@@ -269,6 +276,7 @@ def scan(path: str, timeline: bool = True) -> tuple[_Scan, float | None]:
             acc.add_samples(block, offset)
             if timeline:
                 acc.add_true_peak(block)
+                acc.clips.add(block)
             offset += len(block)
 
             pending = np.concatenate((pending, block))
@@ -291,6 +299,7 @@ def scan(path: str, timeline: bool = True) -> tuple[_Scan, float | None]:
 
     if timeline:
         acc.add_true_peak(None)
+        acc.clips.finish()
 
     lufs = ebur.get_loudness_global(meter)
     return acc, lufs if math.isfinite(lufs) else None
@@ -346,4 +355,5 @@ def analyze(path: str) -> dict:
             "db": acc.spectrogram_db(),
         },
         "stereo": acc.stereo_image(),
+        "clipping": acc.clips.result(),
     }

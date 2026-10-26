@@ -211,3 +211,121 @@ def test_oversized_upload_is_413(client, tmp_path, monkeypatch):
     response = post(client, write(tmp_path / "big.wav", sine(1, -20.0)))
 
     assert response.status_code == 413
+
+
+# Clipping --------------------------------------------------------------------
+
+
+def clip_at(data, runs, rate=RATE):
+    """Write full-scale runs into a copy: (channel, start second, length)."""
+    out = data.copy()
+    for channel, second, length in runs:
+        start = int(second * rate)
+        out[start : start + length, channel] = 1.0
+    return out
+
+
+def test_clean_file_has_no_clipping(client, tmp_path):
+    clipping = post(client, write(tmp_path / "c.wav", sine(2, -1.0))).json()["clipping"]
+
+    assert clipping == {
+        "full_scale": 0.9999,
+        "min_run": 3,
+        "events": [],
+        "events_total": 0,
+        "clipped_samples": 0,
+    }
+
+
+def test_overdriven_sine_saturating_24_bit_pcm(client, tmp_path):
+    """A 5 Hz sine driven to 2/sqrt(3) of full scale, saturated by the 24-bit
+    format (2^23 - 1 reads 0.99999988), for half a second in the middle of a
+    quiet file. |sine| >= sqrt(3)/2 from 60 to 120 degrees of each half
+    cycle: a 33.3 ms flat top around each crest, 66.7 ms from the next, on
+    both channels — so one two-channel event per crest."""
+    seconds, burst = 2.0, (0.7, 1.2)
+    t = np.arange(int(seconds * RATE)) / RATE
+    signal = 0.1 * np.sin(2 * np.pi * 5 * t)
+    inside = (t >= burst[0]) & (t < burst[1])
+    drive = 2 / math.sqrt(3)
+    signal[inside] = np.clip(drive * np.sin(2 * np.pi * 5 * t[inside]), -1.0, 1.0)
+    clipping = post(client, write(tmp_path / "o.wav", np.column_stack([signal, signal]))).json()[
+        "clipping"
+    ]
+
+    events = clipping["events"]
+    assert clipping["events_total"] == len(events) == 5  # crests at 0.75, 0.85 .. 1.15 s
+    for k, event in enumerate(events):
+        assert event["channels"] == [0, 1]
+        assert abs(event["start_s"] - (0.75 + 0.1 * k - 1 / 60)) <= 0.001
+        assert abs(event["end_s"] - (0.75 + 0.1 * k + 1 / 60)) <= 0.001
+        assert abs(event["samples"] - 2 * RATE / 30) <= 2 * 48
+        assert event["peak_dbfs"] == 0.0
+    assert clipping["clipped_samples"] == sum(e["samples"] for e in events)
+
+
+def test_two_full_scale_samples_are_not_a_clip(client, tmp_path):
+    quiet = sine(1, -20.0)
+    clipping = post(client, write(tmp_path / "t.wav", clip_at(quiet, [(0, 0.5, 2)]))).json()[
+        "clipping"
+    ]
+
+    assert clipping["events"] == [] and clipping["clipped_samples"] == 0
+
+
+def test_runs_closer_than_50_ms_merge(client, tmp_path):
+    quiet = sine(2, -20.0)
+    runs = [(0, 0.2, 3), (1, 0.23, 4), (0, 1.0, 3), (0, 1.08, 5)]
+    clipping = post(client, write(tmp_path / "m.wav", clip_at(quiet, runs))).json()["clipping"]
+
+    assert [(e["start_s"], e["channels"], e["samples"]) for e in clipping["events"]] == [
+        (0.2, [0, 1], 7),  # 30 ms apart, different channels: one event
+        (1.0, [0], 3),  # 80 ms apart: two
+        (1.08, [0], 5),
+    ]
+    assert clipping["events"][0]["end_s"] == round(0.23 + 4 / RATE, 4)
+    assert clipping["clipped_samples"] == 15
+
+
+def test_run_across_a_block_edge_counts_once(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.analyze._BLOCK", 4800)  # a block every 100 ms
+    quiet = sine(1, -20.0)
+    edge = 5 * 4800
+    quiet[edge - 2 : edge + 3, 1] = -1.0  # five samples, two before the edge
+    quiet[2 * 4800 - 1 : 2 * 4800 + 1, 0] = 1.0  # two samples astride an edge: no clip
+    quiet[-3:, 0] = 1.0  # a run ending with the file
+    clipping = post(client, write(tmp_path / "e.wav", quiet)).json()["clipping"]
+
+    assert [(e["start_s"], e["channels"], e["samples"]) for e in clipping["events"]] == [
+        (round((edge - 2) / RATE, 4), [1], 5),
+        (round((RATE - 3) / RATE, 4), [0], 3),
+    ]
+    assert clipping["events"][-1]["end_s"] == 1.0
+
+
+def test_only_the_right_channel_clips(client, tmp_path):
+    quiet = sine(1, -20.0)
+    clipping = post(client, write(tmp_path / "r.wav", clip_at(quiet, [(1, 0.4, 10)]))).json()[
+        "clipping"
+    ]
+
+    assert [e["channels"] for e in clipping["events"]] == [[1]]
+    assert clipping["events"][0]["samples"] == 10
+
+
+def test_events_are_capped_at_500_largest(client, tmp_path):
+    """520 runs 100 ms apart; the 20 shortest are dropped from the list but
+    not from the count, and the rest stay in time order."""
+    rate = 8_000
+    quiet = sine(53, -20.0, rate=rate)[:, :1]
+    lengths = [3 if k % 26 == 0 else 4 for k in range(520)]
+    runs = [(0, 0.1 * k + 0.05, n) for k, n in enumerate(lengths)]
+    path = write(tmp_path / "cap.wav", clip_at(quiet, runs, rate=rate), rate=rate)
+    clipping = post(client, path).json()["clipping"]
+
+    assert clipping["events_total"] == 520
+    assert len(clipping["events"]) == 500
+    assert all(e["samples"] == 4 for e in clipping["events"])
+    starts = [e["start_s"] for e in clipping["events"]]
+    assert starts == sorted(starts)
+    assert clipping["clipped_samples"] == sum(lengths)
