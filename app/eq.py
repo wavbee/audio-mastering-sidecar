@@ -201,7 +201,7 @@ def eq_match(
     max_gain_db: float = 6.0,
     bit_depth: int = 24,
 ) -> dict:
-    acc, lufs = scan(path)
+    acc, lufs = scan(path, timeline=False)
     if lufs is None:
         raise SilentError("the file has no integrated loudness (silent or under 400 ms)")
     own_mid, own_side = (relative(levels, lufs) for levels in acc.spectrum_db())

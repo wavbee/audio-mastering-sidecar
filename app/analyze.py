@@ -1,4 +1,4 @@
-"""Raw shape of a recording: waveform overview, long-term spectrum, a coarse
+"""Raw shape of a recording: waveform overview, long-term spectrum, a
 spectrogram and stereo image.
 
 Everything is a measurement a caller can draw or compare; nothing here says
@@ -19,6 +19,10 @@ Choices that matter to a caller comparing two files:
   * Bands narrower than one FFT bin (low bands at high sample rates) are
     filled by interpolating their neighbours in log-frequency. JSON has no
     NaN, and a hole in the curve is not a measurement either.
+  * The waveform carries a true peak per point beside the sample peak: the
+    largest value of the x4-oversampled signal, as BS.1770 defines true peak.
+    It is not clipped at 1.0; an inter-sample peak over full scale is exactly
+    what a converter or a lossy encoder will turn into distortion.
 
 The file is read in blocks, so a ten-minute 96 kHz stereo file never sits in
 memory as one float64 array.
@@ -31,14 +35,14 @@ import math
 import numpy as np
 import pyebur128 as ebur
 import soundfile as sf
-from scipy.signal import get_window
+from scipy.signal import get_window, resample_poly
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 
 FRAME = 8192
 HOP = FRAME // 2
 SILENCE_DBFS = -60.0
-MAX_POINTS = 1000
+MAX_POINTS = 4000
 MAX_SPECTROGRAM_FRAMES = 300
 SPECTROGRAM_FLOOR_DB = -120
 # Level reported for a band with no energy at all (digital silence). Far
@@ -46,6 +50,13 @@ SPECTROGRAM_FLOOR_DB = -120
 DENSITY_FLOOR_DB = -300.0
 
 _BLOCK = 64 * HOP
+
+# True peak: x4 polyphase oversampling (ITU-R BS.1770-4 Annex 2). scipy's
+# default resample_poly filter reaches 10 input samples either side, so 64
+# samples of context at each block edge leave every evaluated value exactly
+# what a single whole-file pass would give.
+OVERSAMPLE = 4
+_TP_CONTEXT = 64
 
 
 def _centres(step: int, lowest: float, highest: float) -> np.ndarray:
@@ -120,6 +131,10 @@ class _Scan:
         self.peak = np.zeros(self.points)
         self.square_sum = np.zeros(self.points)
         self.point_samples = np.zeros(self.points, dtype=np.int64)
+        self.true_peak = np.zeros(self.points)
+        self._tp_buffer = np.zeros((0, channels))
+        self._tp_start = 0  # file position of _tp_buffer[0]
+        self._tp_done = 0  # file position up to which true peak is final
 
         # sum L*L, R*R, L*R, M*M, S*S
         self.stereo_sums = np.zeros(5)
@@ -146,6 +161,35 @@ class _Scan:
                 mid @ mid,
                 side @ side,
             ]
+
+    def add_true_peak(self, block: np.ndarray | None) -> None:
+        """Feed the next block (``None`` at end of file). Each block is
+        oversampled with the previous block's last samples in front of it, and
+        its own last samples wait for the next block, so no peak is created or
+        hidden at a block edge. The file's own ends are treated as silence on
+        the far side, as any true-peak meter does."""
+        if block is not None:
+            self._tp_buffer = np.concatenate((self._tp_buffer, block))
+        end = self._tp_start + len(self._tp_buffer)
+        stop = end if block is None else end - _TP_CONTEXT
+        if stop <= self._tp_done:
+            return
+        upsampled = resample_poly(self._tp_buffer, OVERSAMPLE, 1, axis=0)
+        first = (self._tp_done - self._tp_start) * OVERSAMPLE
+        last = (stop - self._tp_start) * OVERSAMPLE
+        magnitude = np.abs(upsampled[first:last]).max(axis=1)
+        # Upsampled value j sits at file position (_tp_done + j / 4).
+        position = np.arange(self._tp_done * OVERSAMPLE, stop * OVERSAMPLE)
+        point = (position * self.points) // (self.frames * OVERSAMPLE)
+        starts = np.concatenate(([0], np.flatnonzero(np.diff(point)) + 1))
+        ids = point[starts]
+        reduced = np.maximum.reduceat(magnitude, starts)
+        self.true_peak[ids] = np.maximum(self.true_peak[ids], reduced)
+
+        self._tp_done = stop
+        keep = max(stop - _TP_CONTEXT - self._tp_start, 0)
+        self._tp_buffer = self._tp_buffer[keep:]
+        self._tp_start += keep
 
     def add_frames(self, mid: np.ndarray, side: np.ndarray | None) -> None:
         """Spectral statistics for a batch of full FRAME-length frames (rows)."""
@@ -211,8 +255,10 @@ def _mid_side(data: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
     return (data[:, 0] + data[:, 1]) / 2, (data[:, 0] - data[:, 1]) / 2
 
 
-def scan(path: str) -> tuple[_Scan, float | None]:
-    """One streaming pass: every accumulator, plus integrated loudness."""
+def scan(path: str, timeline: bool = True) -> tuple[_Scan, float | None]:
+    """One streaming pass: every accumulator, plus integrated loudness.
+    ``timeline=False`` skips the true-peak oversampling, the costliest
+    accumulator, for callers that only want the spectrum."""
     info = sf.info(path)
     if info.frames <= 0:
         raise ValueError("the file holds no audio frames")
@@ -225,6 +271,8 @@ def scan(path: str) -> tuple[_Scan, float | None]:
         for block in f.blocks(blocksize=_BLOCK, dtype="float64", always_2d=True):
             meter.add_frames(np.ascontiguousarray(block).ravel(), len(block))
             acc.add_samples(block, offset)
+            if timeline:
+                acc.add_true_peak(block)
             offset += len(block)
 
             pending = np.concatenate((pending, block))
@@ -244,6 +292,9 @@ def scan(path: str) -> tuple[_Scan, float | None]:
         padded[: len(pending)] = pending
         mid, side = _mid_side(padded)
         acc.add_frames(mid[None, :], None if side is None else side[None, :])
+
+    if timeline:
+        acc.add_true_peak(None)
 
     lufs = ebur.get_loudness_global(meter)
     return acc, lufs if math.isfinite(lufs) else None
@@ -265,6 +316,10 @@ def analyze(path: str) -> dict:
     mid, side = acc.spectrum_db()
     duration = acc.frames / acc.rate
     rms = np.sqrt(acc.square_sum / np.maximum(acc.point_samples, 1))
+    # The oversampling filter is not exactly interpolating, so at a point
+    # whose peak sits on a sample it can read a hair under that sample. A true
+    # peak is never below the sample peak, by definition.
+    true_peak = np.maximum(acc.true_peak, acc.peak)
 
     return {
         "analysis_version": ANALYSIS_VERSION,
@@ -279,6 +334,7 @@ def analyze(path: str) -> dict:
             "seconds_per_point": round(duration / acc.points, 6),
             "peak": _rounded(acc.peak, 4),
             "rms": _rounded(rms, 4),
+            "true_peak": _rounded(true_peak, 4),
         },
         "spectrum": {
             "bands_hz": _rounded(SPECTRUM_BANDS_HZ, 2),

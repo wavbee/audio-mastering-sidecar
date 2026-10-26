@@ -6,7 +6,7 @@ import re
 import numpy as np
 
 from app.analyze import SPECTROGRAM_BANDS_HZ, SPECTRUM_BANDS_HZ
-from tests.conftest import noise, sine, write
+from tests.conftest import RATE, noise, sine, write
 
 
 def post(client, path):
@@ -37,15 +37,16 @@ def test_shape_and_lengths(client, tmp_path):
     assert response.status_code == 200
     body = response.json()
 
-    assert body["analysis_version"] == 1
+    assert body["analysis_version"] == 2
     assert body["format"] == {"sample_rate": 48000, "channels": 2, "duration_s": 3.0}
     assert isinstance(body["integrated_lufs"], float)
 
     wave = body["waveform"]
-    assert wave["points"] == 1000
-    assert len(wave["peak"]) == len(wave["rms"]) == 1000
-    assert math.isclose(wave["seconds_per_point"], 0.003)
+    assert wave["points"] == 4000
+    assert len(wave["peak"]) == len(wave["rms"]) == len(wave["true_peak"]) == 4000
+    assert math.isclose(wave["seconds_per_point"], 0.00075)
     assert all(0 <= r <= p <= 1 for p, r in zip(wave["peak"], wave["rms"], strict=True))
+    assert all(t >= p for p, t in zip(wave["peak"], wave["true_peak"], strict=True))
 
     spectrum = body["spectrum"]
     assert spectrum["bands_hz"] == [round(f, 2) for f in SPECTRUM_BANDS_HZ]
@@ -130,6 +131,31 @@ def test_waveform_peak_of_a_minus_6_dbfs_sine(client, tmp_path):
     assert body["stereo"] == {"correlation": 1.0, "side_to_mid_db": None}
 
 
+def test_true_peak_reads_an_inter_sample_peak_over_full_scale(client, tmp_path):
+    """A sine at fs/4 with a 45 degree phase lands every sample at 0.707 of
+    its amplitude. Sampled at -0.5 dBFS, its true peak is 3 dB higher:
+    about +2.5 dBTP, which only oversampling can see."""
+    n = np.arange(3 * RATE)
+    amplitude = 10 ** (-0.5 / 20) / math.sin(math.pi / 4)
+    tone = amplitude * np.sin(np.pi / 2 * n + np.pi / 4)
+    wave = post(client, write(tmp_path / "isp.wav", np.column_stack([tone, tone]))).json()[
+        "waveform"
+    ]
+
+    assert abs(max(wave["peak"]) - 10 ** (-0.5 / 20)) <= 0.001
+    inner = wave["true_peak"][10:-10]  # away from the edges' ringing
+    assert all(abs(20 * math.log10(t) - 2.51) <= 0.05 for t in inner)
+    assert all(t > 1.0 >= p for p, t in zip(wave["peak"], wave["true_peak"], strict=True))
+
+
+def test_true_peak_does_not_depend_on_block_edges(client, tmp_path, monkeypatch):
+    path = write(tmp_path / "n.wav", noise(2, 0.9, brightness=0.9, seed=7), subtype="FLOAT")
+    whole = post(client, path).json()["waveform"]["true_peak"]
+    monkeypatch.setattr("app.analyze._BLOCK", 1000)
+
+    assert post(client, path).json()["waveform"]["true_peak"] == whole
+
+
 def test_same_tone_reads_the_same_at_any_sample_rate(client, tmp_path):
     readings = []
     for rate in (44_100, 96_000):
@@ -143,7 +169,7 @@ def test_same_tone_reads_the_same_at_any_sample_rate(client, tmp_path):
 def test_long_files_are_capped(client, tmp_path):
     body = post(client, write(tmp_path / "long.wav", sine(30, -20.0))).json()
 
-    assert body["waveform"]["points"] == 1000
+    assert body["waveform"]["points"] == 4000
     assert body["spectrogram"]["frames"] == len(body["spectrogram"]["db"]) == 300
     assert math.isclose(body["spectrogram"]["seconds_per_frame"], 0.1)
 

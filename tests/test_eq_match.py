@@ -47,7 +47,7 @@ def test_dark_noise_moves_toward_a_bright_curve(client, tmp_path):
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "audio/wav"
-    assert response.headers["x-analysis-version"] == "1"
+    assert response.headers["x-analysis-version"] == "2"
     out = saved(response, tmp_path)
     assert error_100_to_10k(out, target) <= 0.5 * error_100_to_10k(dark, target)
 
