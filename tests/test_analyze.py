@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 
@@ -59,6 +60,7 @@ def test_shape_and_lengths(client, tmp_path):
     assert all(isinstance(v, int) and v >= -120 for row in gram["db"] for v in row)
 
     assert -1 <= body["stereo"]["correlation"] <= 1
+    assert not re.search(r"-0\.0[,\]}]", response.text)  # a rounded zero is unsigned
     assert isinstance(body["stereo"]["side_to_mid_db"], float)
     assert all(math.isfinite(v) for v in numbers(body))
 

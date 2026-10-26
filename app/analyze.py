@@ -200,8 +200,8 @@ class _Scan:
         correlation = lr / math.sqrt(ll * rr) if ll > 0 and rr > 0 else None
         ratio = 10 * math.log10(ss / mm) if ss > 0 and mm > 0 else None
         return {
-            "correlation": None if correlation is None else round(float(correlation), 4),
-            "side_to_mid_db": None if ratio is None else round(float(ratio), 2),
+            "correlation": None if correlation is None else round(float(correlation), 4) + 0.0,
+            "side_to_mid_db": None if ratio is None else round(float(ratio), 2) + 0.0,
         }
 
 
@@ -256,7 +256,8 @@ def relative(levels_db: np.ndarray | None, lufs: float | None) -> np.ndarray | N
 
 
 def _rounded(values: np.ndarray | None, digits: int) -> list[float] | None:
-    return None if values is None else [round(float(v), digits) for v in values]
+    # + 0.0 turns a rounded -0.0 into 0.0: same number, less surprising JSON.
+    return None if values is None else [round(float(v), digits) + 0.0 for v in values]
 
 
 def analyze(path: str) -> dict:
