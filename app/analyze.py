@@ -43,7 +43,7 @@ FRAME = 8192
 HOP = FRAME // 2
 SILENCE_DBFS = -60.0
 MAX_POINTS = 4000
-MAX_SPECTROGRAM_FRAMES = 300
+MAX_SPECTROGRAM_FRAMES = 1200
 SPECTROGRAM_FLOOR_DB = -120
 # Level reported for a band with no energy at all (digital silence). Far
 # below the 24-bit noise floor (about -190 dB/Hz), and finite, unlike log(0).
@@ -67,11 +67,9 @@ def _centres(step: int, lowest: float, highest: float) -> np.ndarray:
 
 
 # 1/6-octave, 20 Hz .. 20 kHz: 22.1 Hz .. 17.96 kHz (the next centres up and
-# down, 19.7 Hz and 20.16 kHz, fall just outside).
+# down, 19.7 Hz and 20.16 kHz, fall just outside). The spectrogram uses the
+# same grid, so a slice of it lines up band for band with the spectrum.
 SPECTRUM_BANDS_HZ = _centres(6, 20.0, 20_000.0)
-# 1/3-octave on the ISO 266 nominal "25 Hz .. 20 kHz" series: exact centres
-# 24.8 Hz .. 20.16 kHz, hence the small tolerance on both ends.
-SPECTROGRAM_BANDS_HZ = _centres(3, 24.0, 20_200.0)
 
 
 def _band_matrix(centres: np.ndarray, step: int, rate: int) -> tuple[np.ndarray, np.ndarray]:
@@ -113,7 +111,6 @@ class _Scan:
         self.scale[-1] /= 2
 
         self.spec_matrix, self.spec_present = _band_matrix(SPECTRUM_BANDS_HZ, 6, rate)
-        self.gram_matrix, self.gram_present = _band_matrix(SPECTROGRAM_BANDS_HZ, 3, rate)
 
         nb = len(SPECTRUM_BANDS_HZ)
         # [loud frames, all frames] sums of band densities, and frame counts.
@@ -123,7 +120,7 @@ class _Scan:
 
         self.stft_frames = 1 if frames < FRAME else 1 + (frames - FRAME) // HOP
         self.gram_frames = min(MAX_SPECTROGRAM_FRAMES, self.stft_frames)
-        self.gram_sum = np.zeros((self.gram_frames, len(SPECTROGRAM_BANDS_HZ)))
+        self.gram_sum = np.zeros((self.gram_frames, nb))
         self.gram_count = np.zeros(self.gram_frames, dtype=np.int64)
         self.done = 0  # STFT frames processed
 
@@ -203,10 +200,9 @@ class _Scan:
             self.side_sum[1] += side_bands.sum(axis=0)
         self.count += [int(loud.sum()), len(mid)]
 
-        gram_bands = self._density(mid) @ self.gram_matrix
         index = np.arange(self.done, self.done + len(mid))
         group = (index * self.gram_frames) // self.stft_frames
-        np.add.at(self.gram_sum, group, gram_bands)
+        np.add.at(self.gram_sum, group, mid_bands)
         np.add.at(self.gram_count, group, 1)
         self.done += len(mid)
 
@@ -226,11 +222,11 @@ class _Scan:
         return mid, side
 
     def spectrogram_db(self) -> list[list[int]]:
-        widths = SPECTROGRAM_BANDS_HZ * (2 ** (1 / 6) - 2 ** (-1 / 6))
+        widths = SPECTRUM_BANDS_HZ * (2 ** (1 / 12) - 2 ** (-1 / 12))
         rows = []
         for sums, n in zip(self.gram_sum, self.gram_count, strict=True):
             density = _fill(
-                _density_db(sums / max(int(n), 1)), self.gram_present, SPECTROGRAM_BANDS_HZ
+                _density_db(sums / max(int(n), 1)), self.spec_present, SPECTRUM_BANDS_HZ
             )
             # Band power = mean density x bandwidth: a full-scale sine reads -3 dB.
             power = np.maximum(density + 10 * np.log10(widths), SPECTROGRAM_FLOOR_DB)
@@ -346,7 +342,7 @@ def analyze(path: str) -> dict:
         "spectrogram": {
             "frames": acc.gram_frames,
             "seconds_per_frame": round(duration / acc.gram_frames, 6),
-            "bands_hz": _rounded(SPECTROGRAM_BANDS_HZ, 2),
+            "bands_hz": _rounded(SPECTRUM_BANDS_HZ, 2),
             "db": acc.spectrogram_db(),
         },
         "stereo": acc.stereo_image(),

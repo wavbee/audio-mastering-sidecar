@@ -5,7 +5,7 @@ import re
 
 import numpy as np
 
-from app.analyze import SPECTROGRAM_BANDS_HZ, SPECTRUM_BANDS_HZ
+from app.analyze import SPECTRUM_BANDS_HZ
 from tests.conftest import RATE, noise, sine, write
 
 
@@ -56,7 +56,7 @@ def test_shape_and_lengths(client, tmp_path):
 
     gram = body["spectrogram"]
     assert gram["frames"] == len(gram["db"]) == 1 + (3 * 48_000 - 8192) // 4096
-    assert gram["bands_hz"] == [round(f, 2) for f in SPECTROGRAM_BANDS_HZ]
+    assert gram["bands_hz"] == spectrum["bands_hz"]
     assert all(len(row) == len(gram["bands_hz"]) for row in gram["db"])
     assert all(isinstance(v, int) and v >= -120 for row in gram["db"] for v in row)
 
@@ -170,8 +170,23 @@ def test_long_files_are_capped(client, tmp_path):
     body = post(client, write(tmp_path / "long.wav", sine(30, -20.0))).json()
 
     assert body["waveform"]["points"] == 4000
-    assert body["spectrogram"]["frames"] == len(body["spectrogram"]["db"]) == 300
-    assert math.isclose(body["spectrogram"]["seconds_per_frame"], 0.1)
+    # 30 s at 48 kHz is 350 STFT frames: under the cap, so all of them.
+    assert body["spectrogram"]["frames"] == len(body["spectrogram"]["db"]) == 350
+
+
+def test_spectrogram_is_capped_at_1200_frames(client, tmp_path):
+    """1201 hops of 4096 plus one frame is the first length over the cap; a
+    low-rate mono file keeps that quick."""
+    rate = 8_000
+    tone = sine((8192 + 1201 * 4096) / rate, -20.0, freq=500.0, rate=rate)[:, 0]
+    gram = post(client, write(tmp_path / "long.wav", tone, rate=rate, subtype="PCM_16")).json()[
+        "spectrogram"
+    ]
+
+    assert gram["frames"] == len(gram["db"]) == 1200
+    assert gram["bands_hz"] == [round(f, 2) for f in SPECTRUM_BANDS_HZ]
+    assert len(gram["bands_hz"]) == 59
+    assert all(len(row) == 59 for row in gram["db"])
 
 
 def test_very_short_file(client, tmp_path):
