@@ -16,6 +16,8 @@ def test_healthz(client):
     assert body["matchering_version"] == "2.0.6" or body["matchering_version"].count(".") == 2
     assert body["pyloudnorm_version"] != "unknown"
     assert body["libebur128_version"].count(".") == 2
+    assert body["scipy_version"].count(".") == 2
+    assert body["analysis_version"] == 1
 
 
 def test_ebu_tech_3341_case_1_reads_minus_23(client, tmp_path):

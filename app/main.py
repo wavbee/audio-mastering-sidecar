@@ -5,6 +5,8 @@ Endpoints:
   * POST /measure  -> independent BS.1770 readings for one uploaded file.
   * POST /match    -> the uploaded ``target`` mastered to the uploaded
                       ``reference`` (Matchering); the response body is WAV.
+  * POST /analyze  -> waveform overview, long-term spectrum, spectrogram and
+                      stereo image of one uploaded file.
 
 Uploads only. There is deliberately no "fetch this URL" variant: a sidecar
 that fetches arbitrary URLs from inside a private network is an SSRF proxy,
@@ -22,11 +24,13 @@ from importlib.metadata import version
 
 import matchering
 import pyebur128
+import scipy
 from fastapi import FastAPI, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
 from app import __version__ as SERVICE_VERSION
+from app.analyze import ANALYSIS_VERSION, analyze
 from app.config import MAX_UPLOAD_BYTES, PROCESS_TIMEOUT_S
 from app.master import MatchError, match
 from app.measure import measure
@@ -69,6 +73,8 @@ def healthz() -> dict:
         # pyloudnorm has no __version__; the installed distribution knows it.
         "pyloudnorm_version": version("pyloudnorm"),
         "libebur128_version": str(pyebur128.get_libebur128_version()),
+        "scipy_version": scipy.__version__,
+        "analysis_version": ANALYSIS_VERSION,
     }
 
 
@@ -82,6 +88,20 @@ async def measure_endpoint(file: UploadFile):
             return _error(413, "payload_too_large", f"file exceeds {MAX_UPLOAD_BYTES} bytes")
         except TimeoutError:
             return _error(504, "timeout", f"measurement exceeded {PROCESS_TIMEOUT_S}s")
+        except (RuntimeError, ValueError) as error:
+            return _unreadable(error)
+
+
+@app.post("/analyze")
+async def analyze_endpoint(file: UploadFile):
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            path = await _save(file, directory, "input.wav")
+            return await asyncio.wait_for(asyncio.to_thread(analyze, path), PROCESS_TIMEOUT_S)
+        except _TooLarge:
+            return _error(413, "payload_too_large", f"file exceeds {MAX_UPLOAD_BYTES} bytes")
+        except TimeoutError:
+            return _error(504, "timeout", f"analysis exceeded {PROCESS_TIMEOUT_S}s")
         except (RuntimeError, ValueError) as error:
             return _unreadable(error)
 
