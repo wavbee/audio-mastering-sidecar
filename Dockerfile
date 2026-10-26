@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
 
 COPY --from=build /venv /venv
 ENV PATH="/venv/bin:$PATH"
+# One numeric thread per process. A request is handled by one worker; letting
+# BLAS/OpenMP size its pool to the host oversubscribes the CPU as soon as
+# there is more than one worker (measured: 8 workers on 16 cores, load 60).
+ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 WORKDIR /app
 COPY app/ ./app/
 
