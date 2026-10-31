@@ -217,6 +217,27 @@ The lows are cut by the full 6 dB × 0.8, the top is lifted, and the 17.96 kHz
 band, which also wanted a lift, stays at 0.0 because nothing is boosted above
 16 kHz.
 
+### `POST /compress`
+
+A stereo-linked bus compressor for glue. Multipart `file`, plus form fields
+`threshold_db` (−40..0), `ratio` (1..10), `attack_ms` (0.1..100),
+`release_ms` (10..1000) and `mix` (0..1, default 1: fully compressed; 0
+returns the input). The response body is the compressed file as 32-bit float
+WAV, the same length and rate, sample-aligned with the input.
+
+Pedalboard's compressor supplies the gain computer and ballistics, run once
+over the louder channel at each sample; the gain it applies is applied to
+every channel alike, so the stereo image does not move. There is no make-up
+gain: loudness is the caller's to set afterwards. How hard it worked comes
+back in `X-Compression`, measured from the gain actually applied:
+
+```json
+{"max_reduction_db": 10.49, "mean_reduction_db": 5.21, "reduced_share": 0.5}
+```
+
+`reduced_share` is the share of the audible signal turned down by more than
+0.5 dB.
+
 ### Errors
 
 ```json
