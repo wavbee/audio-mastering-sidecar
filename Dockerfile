@@ -12,8 +12,9 @@ RUN python -m venv /venv && /venv/bin/pip install --no-cache-dir .
 
 FROM python:3.13-slim
 
-# libsndfile backs soundfile, which Matchering and both meters read through.
-RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
+# libsndfile backs soundfile, which Matchering and both meters read through;
+# Pedalboard's native module links libatomic, which the slim image lacks.
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /venv /venv
@@ -27,6 +28,9 @@ COPY app/ ./app/
 
 RUN useradd --create-home --uid 10001 appuser
 USER appuser
+# Fail the build, not the container, when a native library is missing: the
+# app is imported here exactly as uvicorn will import it.
+RUN python -c "import app.main"
 
 EXPOSE 8000
 
