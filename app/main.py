@@ -9,6 +9,8 @@ Endpoints:
                       stereo image of one uploaded file.
   * POST /eq_match -> the uploaded ``file`` EQ'd toward a caller-supplied
                       tonal-balance curve; the response body is WAV.
+  * POST /compress -> the uploaded ``file`` through a stereo-linked bus
+                      compressor; the response body is 32-bit float WAV.
 
 Uploads only. There is deliberately no "fetch this URL" variant: a sidecar
 that fetches arbitrary URLs from inside a private network is an SSRF proxy,
@@ -27,6 +29,7 @@ from collections.abc import Callable
 from importlib.metadata import version
 
 import matchering
+import pedalboard
 import pyebur128
 import scipy
 from fastapi import FastAPI, Form, UploadFile
@@ -35,6 +38,9 @@ from starlette.background import BackgroundTask
 
 from app import __version__ as SERVICE_VERSION
 from app.analyze import ANALYSIS_VERSION, analyze
+from app.compress import ParameterError as CompressParameterError
+from app.compress import compress
+from app.compress import parse_parameters as parse_compress_parameters
 from app.config import MAX_UPLOAD_BYTES, PROCESS_TIMEOUT_S
 from app.eq import CurveError, ParameterError, eq_match, parse_curve, parse_parameters
 from app.master import MatchError, match
@@ -93,6 +99,7 @@ def healthz() -> dict:
         "pyloudnorm_version": version("pyloudnorm"),
         "libebur128_version": str(pyebur128.get_libebur128_version()),
         "scipy_version": scipy.__version__,
+        "pedalboard_version": pedalboard.__version__,
         "analysis_version": ANALYSIS_VERSION,
     }
 
@@ -199,6 +206,56 @@ async def eq_match_endpoint(
             "X-Applied-Curve": json.dumps(details["applied_curve"], separators=(",", ":")),
             "X-Output-Gain-Db": str(details["output_gain_db"]),
             "X-Analysis-Version": str(ANALYSIS_VERSION),
+        },
+        background=BackgroundTask(cleanup),
+    )
+
+
+@app.post("/compress")
+async def compress_endpoint(
+    file: UploadFile,
+    threshold_db: str = Form(...),
+    ratio: str = Form(...),
+    attack_ms: str = Form(...),
+    release_ms: str = Form(...),
+    mix: str = Form("1.0"),
+):
+    try:
+        settings = parse_compress_parameters(
+            {
+                "threshold_db": threshold_db,
+                "ratio": ratio,
+                "attack_ms": attack_ms,
+                "release_ms": release_ms,
+                "mix": mix,
+            }
+        )
+    except CompressParameterError as error:
+        return _error(422, "invalid_parameter", str(error))
+
+    directory, cleanup = _temp_dir()
+    try:
+        path = await _save(file, directory, "input.wav")
+        output = os.path.join(directory, "compressed.wav")
+        details = await asyncio.wait_for(
+            asyncio.to_thread(compress, path, output, settings), PROCESS_TIMEOUT_S
+        )
+    except _TooLarge:
+        cleanup()
+        return _error(413, "payload_too_large", f"file exceeds {MAX_UPLOAD_BYTES} bytes")
+    except TimeoutError:
+        cleanup()
+        return _error(504, "timeout", f"compression exceeded {PROCESS_TIMEOUT_S}s")
+    except (RuntimeError, ValueError) as error:
+        cleanup()
+        return _unreadable(error)
+
+    return FileResponse(
+        output,
+        media_type="audio/wav",
+        headers={
+            "X-Compression": json.dumps(details, separators=(",", ":")),
+            "X-Pedalboard-Version": pedalboard.__version__,
         },
         background=BackgroundTask(cleanup),
     )
