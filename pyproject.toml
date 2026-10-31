@@ -8,13 +8,17 @@ requires-python = ">=3.13"
 authors = [{ name = "wavbee" }]
 keywords = ["audio", "mastering", "matchering", "loudness", "ebu-r128", "fastapi"]
 
+# Upper bounds where a release could break us: matchering 2.0.6 (unchanged
+# since 2022) imports scipy.ndimage.filters, which SciPy 2.0 removes, and it
+# was written against NumPy 1/2 APIs.
 dependencies = [
-  "matchering>=2.0.6",
+  "matchering==2.0.6",
   "pyloudnorm>=0.2.0",
   "pyebur128>=0.1.1",
   "soundfile>=0.14.0",
-  "numpy>=2.5.4",
-  "scipy>=1.18.1",
+  "numpy>=2.5.4,<3",
+  "scipy>=1.18.1,<2",
+  "pedalboard>=0.9.26",
   "fastapi>=0.162.0",
   "uvicorn[standard]>=0.54.0",
   "python-multipart>=0.0.32",
